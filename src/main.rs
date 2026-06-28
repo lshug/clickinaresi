@@ -22,6 +22,7 @@ const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "ogg"];
 const LAST_PLAYLIST_KEY: &str = "last_playlist";
 const MIDI_BINDINGS_KEY: &str = "midi_bindings";
 const MIDI_PORT_KEY: &str = "midi_port";
+const VOLUME_KEY: &str = "volume_db";
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -105,6 +106,8 @@ struct Player {
     state: PlaybackState,
     /// Display name of the track currently loaded into the sink.
     current: Option<String>,
+    /// Output gain in decibels (0 dB = unity). Applied to every sink.
+    volume_db: f32,
 }
 
 impl Player {
@@ -117,7 +120,18 @@ impl Player {
             sink,
             state: PlaybackState::Stopped,
             current: None,
+            volume_db: 0.0,
         })
+    }
+
+    /// Linear amplitude factor for the current gain (rodio's `set_volume` unit).
+    fn amplitude(&self) -> f32 {
+        10f32.powf(self.volume_db / 20.0)
+    }
+
+    fn set_volume_db(&mut self, db: f32) {
+        self.volume_db = db;
+        self.sink.set_volume(self.amplitude());
     }
 
     /// Loads `path` into a fresh sink and starts playback immediately.
@@ -126,6 +140,7 @@ impl Player {
         let source = Decoder::new(BufReader::new(file))?;
         // A stopped sink cannot be reused, so always start from a clean one.
         self.sink = Sink::try_new(&self.handle)?;
+        self.sink.set_volume(self.amplitude());
         self.sink.append(source);
         self.sink.play();
         self.state = PlaybackState::Playing;
@@ -356,6 +371,11 @@ impl App {
             // Restore saved MIDI bindings.
             if let Some(text) = storage.get_string(MIDI_BINDINGS_KEY) {
                 app.bindings.lock().unwrap().map = bindings_from_json(&text);
+            }
+
+            // Restore the last volume setting.
+            if let Some(db) = storage.get_string(VOLUME_KEY).and_then(|s| s.parse().ok()) {
+                app.player.set_volume_db(db);
             }
 
             // Reconnect to the last-used MIDI port if it is present.
@@ -686,6 +706,20 @@ impl App {
             }
 
             ui.add_space(16.0);
+            ui.label(RichText::new("Vol").size(18.0));
+            let mut db = self.player.volume_db;
+            if ui
+                .add(
+                    egui::Slider::new(&mut db, -60.0..=24.0)
+                        .suffix(" dB")
+                        .fixed_decimals(0),
+                )
+                .changed()
+            {
+                self.player.set_volume_db(db);
+            }
+
+            ui.add_space(16.0);
             if ui.button(RichText::new("⚙ MIDI").size(18.0)).clicked() {
                 self.show_config = true;
                 self.refresh_ports();
@@ -931,5 +965,6 @@ impl eframe::App for App {
         if let Some(port) = &self.connected_port {
             storage.set_string(MIDI_PORT_KEY, port.clone());
         }
+        storage.set_string(VOLUME_KEY, self.player.volume_db.to_string());
     }
 }
